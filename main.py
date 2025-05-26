@@ -278,7 +278,7 @@ def main():
     # Run both the bot and the web server
     async def runner():
         bot_task = asyncio.create_task(client.run_until_disconnected())
-        web_task = asyncio.create_task(uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info"))
+        web_task = asyncio.create_task(uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info"))
         await asyncio.gather(bot_task, web_task)
     loop.run_until_complete(runner())
 
