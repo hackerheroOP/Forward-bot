@@ -10,7 +10,6 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-import threading
 import uvicorn
 
 # Load environment variables
@@ -273,18 +272,15 @@ async def dashboard():
     html += "</table>"
     return html
 
-def start_telegram():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(client.start(bot_token=BOT_TOKEN))
+async def start_all():
+    await client.start(bot_token=BOT_TOKEN)
     print("Telegram bot started")
-    loop.run_until_complete(client.run_until_disconnected())
-
-def run():
-    # Start the Telegram bot in a separate thread
-    threading.Thread(target=start_telegram, daemon=True).start()
-    # Start FastAPI server (blocking)
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Run both the bot and the web server in the same event loop
+    bot_task = asyncio.create_task(client.run_until_disconnected())
+    config = uvicorn.Config(app, host="0.0.0.0", port=8080, loop="asyncio")
+    server = uvicorn.Server(config)
+    web_task = asyncio.create_task(server.serve())
+    await asyncio.gather(bot_task, web_task)
 
 if __name__ == "__main__":
-    run()
+    asyncio.run(start_all())
