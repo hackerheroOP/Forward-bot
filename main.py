@@ -277,7 +277,7 @@ async def start_all():
     print("Telegram bot started")
     # Run both the bot and the web server in the same event loop
     bot_task = asyncio.create_task(client.run_until_disconnected())
-    config = uvicorn.Config(app, host="0.0.0.0", port=8080, loop="asyncio")
+    config = uvicorn.Config(app, host="0.0.0.0", port=8000, loop="asyncio")
     server = uvicorn.Server(config)
     web_task = asyncio.create_task(server.serve())
     await asyncio.gather(bot_task, web_task)
