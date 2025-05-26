@@ -430,7 +430,7 @@ class ForwarderBot:
             logger.error(f"Error in broadcast: {e}")
 
 # Initialize bot instance
-bot = ForwarderBot()
+
 # Continue from Part 1...
 
 # Add this method to the ForwarderBot class (insert before bot = ForwarderBot())
@@ -1066,6 +1066,7 @@ async def status_command(client, message: Message):
     except Exception as e:
         logger.error(f"Error in /status command: {e}")
         await message.reply("❌ An error occurred. Please try again.")
+bot = ForwarderBot()
 
 @app.on_message(filters.command("cleanup"))
 async def cleanup_command(client, message: Message):
