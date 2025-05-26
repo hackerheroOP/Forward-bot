@@ -2,7 +2,7 @@ import os
 import asyncio
 import random
 from datetime import datetime
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.errors.rpcerrorlist import ChatWriteForbiddenError
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse
 import uvicorn
 
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME")
