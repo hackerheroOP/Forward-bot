@@ -10,6 +10,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
+import threading
 import uvicorn
 
 # Load environment variables
@@ -23,7 +24,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # Setup Telethon and MongoDB
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 mongo = AsyncIOMotorClient(MONGO_URI)
 db = mongo[DB_NAME]
 settings_col = db['user_settings']
@@ -272,15 +273,18 @@ async def dashboard():
     html += "</table>"
     return html
 
-# --- Run both FastAPI and Telethon ---
-def main():
-    loop = asyncio.get_event_loop()
-    # Run both the bot and the web server
-    async def runner():
-        bot_task = asyncio.create_task(client.run_until_disconnected())
-        web_task = asyncio.create_task(uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info"))
-        await asyncio.gather(bot_task, web_task)
-    loop.run_until_complete(runner())
+def start_telegram():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(client.start(bot_token=BOT_TOKEN))
+    print("Telegram bot started")
+    loop.run_until_complete(client.run_until_disconnected())
+
+def run():
+    # Start the Telegram bot in a separate thread
+    threading.Thread(target=start_telegram, daemon=True).start()
+    # Start FastAPI server (blocking)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
 
 if __name__ == "__main__":
-    main()
+    run()
