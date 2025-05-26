@@ -1,10 +1,9 @@
 import os
 import asyncio
 import random
-from datetime import datetime
-#from dotenv import load_dotenv
+from datetime import datetime, timezone
 from telethon import TelegramClient, events
-from telethon.errors.rpcerrorlist import ChatWriteForbiddenError
+from telethon.errors.rpcerrorlist import ChatWriteForbiddenError, BotMethodInvalidError
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -12,8 +11,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 import uvicorn
 
-# Load environment variables
-#load_dotenv()
+# --- Environment Variables from Koyeb ---
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_NAME = os.getenv("SESSION_NAME")
@@ -22,7 +20,7 @@ DB_NAME = os.getenv("DB_NAME")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# Setup Telethon and MongoDB
+# --- Telethon and MongoDB Setup ---
 client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
 mongo = AsyncIOMotorClient(MONGO_URI)
 db = mongo[DB_NAME]
@@ -52,7 +50,7 @@ async def is_forwarded(user_id, source_channel, msg_id):
     return await msglog_col.find_one({'user_id': user_id, 'source_channel': source_channel, 'msg_id': msg_id}) is not None
 
 async def add_user(user_id):
-    await users_col.update_one({'user_id': user_id}, {'$set': {'joined': datetime.utcnow()}}, upsert=True)
+    await users_col.update_one({'user_id': user_id}, {'$set': {'joined': datetime.now(timezone.utc)}}, upsert=True)
 
 @client.on(events.NewMessage(pattern='/start'))
 async def start(event):
@@ -144,31 +142,51 @@ async def bulk_forward(user_id):
         target = settings['target_channel']
         web_preview = settings.get('web_preview', True)
         count = 0
-        async for msg in client.iter_messages(source, reverse=True):
+
+        # --- FIX: Proper entity resolution, admin check ---
+        try:
+            source_entity = await client.get_entity(source)
+            target_entity = await client.get_entity(target)
+        except Exception:
+            await client.send_message(user_id, "❌ Bot is not in the channel! Add bot as admin first.")
+            return
+
+        try:
+            source_perms = await client.get_permissions(source_entity, await client.get_me())
+            if not (source_perms.is_admin and source_perms.view_messages):
+                await client.send_message(user_id, "❌ Bot needs admin permissions in source channel!")
+                return
+        except Exception:
+            await client.send_message(user_id, "❌ Bot needs admin permissions in source channel!")
+            return
+
+        async for msg in client.iter_messages(source_entity, reverse=True):
             if await is_forwarded(user_id, source, msg.id):
                 continue
             try:
                 if msg.media:
                     if isinstance(msg.media, (MessageMediaPhoto, MessageMediaDocument)):
                         await client.send_file(
-                            target,
+                            target_entity,
                             msg.media,
                             caption=msg.text or "",
                             link_preview=web_preview
                         )
                 else:
                     await client.send_message(
-                        target,
+                        target_entity,
                         msg.text,
                         link_preview=web_preview
                     )
                 await log_forwarded(user_id, source, msg.id)
                 count += 1
-                await asyncio.sleep(1)  # Basic rate limiting
+                await asyncio.sleep(1)
             except Exception as e:
                 print(f"Bulk forward error: {e}")
                 await asyncio.sleep(5)
         await client.send_message(user_id, f"✅ Bulk forwarding completed! {count} messages/media sent.")
+    except BotMethodInvalidError:
+        await client.send_message(user_id, "❌ Bot needs admin permissions in both channels!")
     except asyncio.CancelledError:
         await client.send_message(user_id, "⏹ Bulk forwarding stopped.")
 
@@ -216,19 +234,37 @@ async def forward_loop(user_id):
         min_t = settings.get('min')
         max_t = settings.get('max')
         web_preview = settings.get('web_preview', True)
-        async for msg in client.iter_messages(source, reverse=True):
+
+        # --- FIX: Proper entity resolution, admin check ---
+        try:
+            source_entity = await client.get_entity(source)
+            target_entity = await client.get_entity(target)
+        except Exception:
+            await client.send_message(user_id, "❌ Bot is not in the channel! Add bot as admin first.")
+            return
+
+        try:
+            source_perms = await client.get_permissions(source_entity, await client.get_me())
+            if not (source_perms.is_admin and source_perms.view_messages):
+                await client.send_message(user_id, "❌ Bot needs admin permissions in source channel!")
+                return
+        except Exception:
+            await client.send_message(user_id, "❌ Bot needs admin permissions in source channel!")
+            return
+
+        async for msg in client.iter_messages(source_entity, reverse=True):
             if await is_forwarded(user_id, source, msg.id):
                 continue
             try:
                 if msg.text:
                     await client.send_message(
-                        target, 
+                        target_entity, 
                         msg.text, 
                         link_preview=web_preview
                     )
                 elif msg.media:
                     await client.send_file(
-                        target, 
+                        target_entity, 
                         msg.media, 
                         caption=msg.text or "",
                         link_preview=web_preview
@@ -275,12 +311,12 @@ async def dashboard():
 async def start_all():
     await client.start(bot_token=BOT_TOKEN)
     print("Telegram bot started")
-    # Run both the bot and the web server in the same event loop
-    bot_task = asyncio.create_task(client.run_until_disconnected())
     config = uvicorn.Config(app, host="0.0.0.0", port=8000, loop="asyncio")
     server = uvicorn.Server(config)
-    web_task = asyncio.create_task(server.serve())
-    await asyncio.gather(bot_task, web_task)
+    await asyncio.gather(
+        client.run_until_disconnected(),
+        server.serve()
+    )
 
 if __name__ == "__main__":
     asyncio.run(start_all())
