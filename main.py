@@ -284,7 +284,7 @@ def run():
     # Start the Telegram bot in a separate thread
     threading.Thread(target=start_telegram, daemon=True).start()
     # Start FastAPI server (blocking)
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
 
 if __name__ == "__main__":
     run()
