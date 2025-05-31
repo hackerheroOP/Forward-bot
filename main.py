@@ -13,6 +13,7 @@ from flask import Flask, render_template, jsonify
 import threading
 import json
 from collections import defaultdict
+import concurrent.futures
 
 load_dotenv()
 
@@ -68,6 +69,7 @@ class ForwarderBot:
         self.is_running = {}
         self.stats_cache = {}
         self.last_stats_update = None
+        self.message_cache = {}  # Cache for storing messages
         logger.info("ForwarderBot initialized")
         
     async def init_db(self):
@@ -199,64 +201,56 @@ class ForwarderBot:
         except Exception as e:
             logger.error(f"Error parsing time interval '{time_str}': {e}")
             return 3600
-        
-    async def get_channel_messages_hash(self, channel_id: int, limit: int = 100) -> set:
-        """Get hash of recent messages from target channel for duplicate detection"""
+
+    async def get_recent_messages_from_db(self, source_channel: int, limit: int = 10):
+        """Get recent messages from database cache"""
         try:
-            message_hashes = set()
-            async for message in app.get_chat_history(channel_id, limit=limit):
-                if message.text:
-                    content_hash = hash(message.text.strip().lower())
-                    message_hashes.add(content_hash)
-                elif message.caption:
-                    content_hash = hash(message.caption.strip().lower())
-                    message_hashes.add(content_hash)
-            logger.debug(f"Retrieved {len(message_hashes)} message hashes from channel {channel_id}")
-            return message_hashes
+            messages = await forwarded_messages_collection.find(
+                {"source_channel": source_channel}
+            ).sort("forwarded_date", -1).limit(limit).to_list(None)
+            return messages
         except Exception as e:
-            logger.error(f"Error getting channel messages from {channel_id}: {e}")
-            return set()
-            
-    async def is_duplicate_message(self, message: Message, target_channel_hashes: set) -> bool:
-        """Check if message is duplicate"""
+            logger.error(f"Error getting recent messages from DB: {e}")
+            return []
+
+    async def store_message_in_cache(self, source_channel: int, message_id: int, content_hash: str):
+        """Store message info in cache"""
         try:
-            if message.text:
-                content_hash = hash(message.text.strip().lower())
-            elif message.caption:
-                content_hash = hash(message.caption.strip().lower())
-            else:
+            cache_key = f"{source_channel}_{message_id}"
+            self.message_cache[cache_key] = {
+                "content_hash": content_hash,
+                "timestamp": get_utc_now()
+            }
+            # Keep only last 100 messages per channel
+            channel_messages = [k for k in self.message_cache.keys() if k.startswith(f"{source_channel}_")]
+            if len(channel_messages) > 100:
+                oldest_key = min(channel_messages, key=lambda k: self.message_cache[k]["timestamp"])
+                del self.message_cache[oldest_key]
+        except Exception as e:
+            logger.error(f"Error storing message in cache: {e}")
+
+    async def is_duplicate_message_by_content(self, content: str, source_channel: int) -> bool:
+        """Check if message content is duplicate using cache"""
+        try:
+            if not content:
                 return False
                 
-            return content_hash in target_channel_hashes
+            content_hash = hash(content.strip().lower())
+            
+            # Check in memory cache
+            for key, data in self.message_cache.items():
+                if key.startswith(f"{source_channel}_") and data["content_hash"] == content_hash:
+                    return True
+                    
+            return False
         except Exception as e:
             logger.error(f"Error checking duplicate message: {e}")
             return False
-        
-    async def delete_duplicate_from_source(self, source_channel: int, target_channel: int):
-        """Delete duplicate messages from source channel"""
-        try:
-            target_hashes = await self.get_channel_messages_hash(target_channel)
-            deleted_count = 0
-            
-            async for message in app.get_chat_history(source_channel, limit=200):
-                if await self.is_duplicate_message(message, target_hashes):
-                    try:
-                        await message.delete()
-                        deleted_count += 1
-                        await asyncio.sleep(1)
-                    except Exception as e:
-                        logger.error(f"Error deleting message {message.id}: {e}")
-                        
-            await self.track_analytics("duplicates_deleted", deleted_count)
-            logger.info(f"Deleted {deleted_count} duplicate messages from channel {source_channel}")
-            return deleted_count
-        except Exception as e:
-            logger.error(f"Error in duplicate deletion: {e}")
-            return 0
             
     async def forward_single_message(self, source_channel: int, target_channel: int, user_id: int):
-        """Forward a single message from source to target"""
+        """Forward a single message from source to target using webhook/updates"""
         try:
+            # Get the last forwarded message ID from database
             channel_data = await channels_collection.find_one({
                 "user_id": user_id,
                 "source_channel": source_channel
@@ -264,16 +258,50 @@ class ForwarderBot:
             
             last_id = channel_data.get("last_forwarded_id", 0) if channel_data else 0
             
-            async for message in app.get_chat_history(source_channel, limit=50):
-                if message.id > last_id:
+            # Since we can't use get_chat_history with bots, we'll rely on real-time message handling
+            # This function will be called when new messages arrive via the message handler
+            logger.info(f"Monitoring channel {source_channel} for new messages to forward to {target_channel}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in forward_single_message: {e}")
+            return False
+
+    async def handle_new_message_for_forwarding(self, message: Message):
+        """Handle new messages for forwarding"""
+        try:
+            source_channel = message.chat.id
+            
+            # Find all forwarding rules for this source channel
+            forwarding_rules = await channels_collection.find({
+                "source_channel": source_channel,
+                "target_channel": {"$ne": None},
+                "is_active": True
+            }).to_list(None)
+            
+            for rule in forwarding_rules:
+                target_channel = rule["target_channel"]
+                user_id = rule["user_id"]
+                
+                # Check if this message should be forwarded
+                if message.id > rule.get("last_forwarded_id", 0):
                     try:
+                        # Check for duplicates
+                        content = message.text or message.caption or ""
+                        if content and await self.is_duplicate_message_by_content(content, source_channel):
+                            logger.info(f"Skipping duplicate message {message.id}")
+                            continue
+                        
+                        # Forward the message
                         forwarded = await message.forward(target_channel)
                         
+                        # Update last forwarded ID
                         await channels_collection.update_one(
                             {"user_id": user_id, "source_channel": source_channel},
                             {"$set": {"last_forwarded_id": message.id}}
                         )
                         
+                        # Store forwarding record
                         await forwarded_messages_collection.insert_one({
                             "user_id": user_id,
                             "source_channel": source_channel,
@@ -283,29 +311,33 @@ class ForwarderBot:
                             "forwarded_date": get_utc_now()
                         })
                         
+                        # Cache message info
+                        if content:
+                            content_hash = hash(content.strip().lower())
+                            await self.store_message_in_cache(source_channel, message.id, content_hash)
+                        
                         await self.track_analytics("messages_forwarded", 1)
                         logger.info(f"Forwarded message {message.id} from {source_channel} to {target_channel}")
-                        return True
+                        
                     except Exception as e:
                         logger.error(f"Error forwarding message {message.id}: {e}")
                         continue
                         
-            logger.debug(f"No new messages to forward from {source_channel}")
-            return False
         except Exception as e:
-            logger.error(f"Error in forward_single_message: {e}")
-            return False
+            logger.error(f"Error in handle_new_message_for_forwarding: {e}")
             
     async def fixed_time_forwarder(self, user_id: int, source_channel: int, target_channel: int, interval: int):
-        """Forward messages at fixed intervals"""
+        """Monitor for forwarding at fixed intervals"""
         task_key = f"{user_id}_{source_channel}_{target_channel}"
         self.is_running[task_key] = True
         logger.info(f"Started fixed time forwarder: {task_key} with interval {interval}s")
         
         try:
             while self.is_running.get(task_key, False):
-                await self.forward_single_message(source_channel, target_channel, user_id)
+                # The actual forwarding happens in the message handler
+                # This just keeps the task alive and updates status
                 await asyncio.sleep(interval)
+                logger.debug(f"Fixed time forwarder {task_key} is active")
         except asyncio.CancelledError:
             logger.info(f"Fixed time forwarder cancelled: {task_key}")
         except Exception as e:
@@ -315,17 +347,17 @@ class ForwarderBot:
             logger.info(f"Fixed time forwarder stopped: {task_key}")
             
     async def random_time_forwarder(self, user_id: int, source_channel: int, target_channel: int, min_interval: int, max_interval: int):
-        """Forward messages at random intervals"""
+        """Monitor for forwarding at random intervals"""
         task_key = f"{user_id}_{source_channel}_{target_channel}"
         self.is_running[task_key] = True
         logger.info(f"Started random time forwarder: {task_key} with interval {min_interval}-{max_interval}s")
         
         try:
             while self.is_running.get(task_key, False):
-                await self.forward_single_message(source_channel, target_channel, user_id)
                 random_interval = random.randint(min_interval, max_interval)
-                logger.debug(f"Next forward in {random_interval}s for {task_key}")
+                logger.debug(f"Next check in {random_interval}s for {task_key}")
                 await asyncio.sleep(random_interval)
+                logger.debug(f"Random time forwarder {task_key} is active")
         except asyncio.CancelledError:
             logger.info(f"Random time forwarder cancelled: {task_key}")
         except Exception as e:
@@ -430,14 +462,70 @@ class ForwarderBot:
         except Exception as e:
             logger.error(f"Error in broadcast: {e}")
 
-    async def get_dashboard_stats(self):
-        """Get comprehensive dashboard statistics"""
+    def get_dashboard_stats_sync(self):
+        """Synchronous wrapper for dashboard stats"""
         if self.last_stats_update and (get_utc_now() - self.last_stats_update).seconds < 300:
             return self.stats_cache
             
         try:
-            logger.debug("Generating dashboard stats")
+            logger.debug("Generating dashboard stats (sync)")
             
+            # Use thread pool for database operations
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(self._get_basic_stats)
+                stats = future.result(timeout=10)
+                
+            self.stats_cache = stats
+            self.last_stats_update = get_utc_now()
+            return self.stats_cache
+            
+        except Exception as e:
+            logger.error(f"Error getting dashboard stats (sync): {e}")
+            return {
+                "total_users": 0,
+                "active_users": 0,
+                "new_users": 0,
+                "growth_rate": 0,
+                "active_tasks": 0,
+                "total_forwarded": 0,
+                "today_forwarded": 0,
+                "total_channels": 0,
+                "daily_stats": [],
+                "current_tasks": [],
+                "last_updated": get_utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+            }
+
+    def _get_basic_stats(self):
+        """Get basic stats without async operations"""
+        try:
+            # Create a new event loop for this thread
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                return loop.run_until_complete(self._async_get_basic_stats())
+            finally:
+                loop.close()
+                
+        except Exception as e:
+            logger.error(f"Error in _get_basic_stats: {e}")
+            return {
+                "total_users": 0,
+                "active_users": 0,
+                "new_users": 0,
+                "growth_rate": 0,
+                "active_tasks": 0,
+                "total_forwarded": 0,
+                "today_forwarded": 0,
+                "total_channels": 0,
+                "daily_stats": [],
+                "current_tasks": [],
+                "last_updated": get_utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+            }
+
+    async def _async_get_basic_stats(self):
+        """Async version of basic stats"""
+        try:
             # Basic user stats
             total_users = await users_collection.count_documents({})
             
@@ -497,45 +585,8 @@ class ForwarderBot:
                     "new_users": day_users,
                     "messages_forwarded": day_forwards
                 })
-                
-            # Current running tasks details
-            current_tasks = []
-            active_schedules = await schedules_collection.find({"is_active": True}).to_list(None)
             
-            for schedule in active_schedules:
-                try:
-                    user_info = await users_collection.find_one({"user_id": schedule["user_id"]})
-                    source_info = await app.get_chat(schedule["source_channel"])
-                    target_info = await app.get_chat(schedule["target_channel"])
-                    
-                    task_info = {
-                        "user_id": schedule["user_id"],
-                        "username": user_info.get("username", "Unknown") if user_info else "Unknown",
-                        "source_channel": source_info.title,
-                        "target_channel": target_info.title,
-                        "mode": schedule["mode"],
-                        "created_date": schedule["created_date"].strftime("%Y-%m-%d %H:%M"),
-                        "status": "Running" if f"{schedule['user_id']}_{schedule['source_channel']}_{schedule['target_channel']}" in self.is_running else "Stopped"
-                    }
-                    
-                    if schedule["mode"] == "fixed":
-                        interval = schedule.get("interval", 0)
-                        hours = interval // 3600
-                        minutes = (interval % 3600) // 60
-                        task_info["schedule"] = f"Every {hours}h {minutes}m" if hours else f"Every {minutes}m"
-                    else:
-                        min_int = schedule.get("min_interval", 0)
-                        max_int = schedule.get("max_interval", 0)
-                        min_h = min_int // 3600
-                        max_h = max_int // 3600
-                        task_info["schedule"] = f"Random {min_h}h-{max_h}h"
-                        
-                    current_tasks.append(task_info)
-                except Exception as e:
-                    logger.error(f"Error getting task info: {e}")
-                    continue
-            
-            self.stats_cache = {
+            return {
                 "total_users": total_users,
                 "active_users": active_users,
                 "new_users": new_users,
@@ -545,29 +596,13 @@ class ForwarderBot:
                 "today_forwarded": today_forwarded,
                 "total_channels": total_channels,
                 "daily_stats": list(reversed(daily_stats)),
-                "current_tasks": current_tasks,
+                "current_tasks": [],  # Simplified for now
                 "last_updated": get_utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
             }
-            
-            self.last_stats_update = get_utc_now()
-            logger.debug("Dashboard stats generated successfully")
-            return self.stats_cache
             
         except Exception as e:
-            logger.error(f"Error getting dashboard stats: {e}")
-            return {
-                "total_users": 0,
-                "active_users": 0,
-                "new_users": 0,
-                "growth_rate": 0,
-                "active_tasks": 0,
-                "total_forwarded": 0,
-                "today_forwarded": 0,
-                "total_channels": 0,
-                "daily_stats": [],
-                "current_tasks": [],
-                "last_updated": get_utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
-            }
+            logger.error(f"Error in _async_get_basic_stats: {e}")
+            raise
 
 # Initialize bot instance
 bot = ForwarderBot()
@@ -686,10 +721,7 @@ def api_stats():
     """API endpoint for dashboard statistics"""
     try:
         logger.debug("API stats endpoint called")
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        stats = loop.run_until_complete(bot.get_dashboard_stats())
-        loop.close()
+        stats = bot.get_dashboard_stats_sync()
         return jsonify(stats)
     except Exception as e:
         logger.error(f"Error in API stats: {e}")
@@ -717,7 +749,6 @@ async def start_command(client, message: Message):
 📤 Forward messages between channels
 ⏰ Fixed time scheduling
 🎲 Random time intervals  
-🗑️ Duplicate message deletion
 📢 Broadcast messages (Admin only)
 📊 Web Dashboard
 
@@ -727,7 +758,6 @@ async def start_command(client, message: Message):
 /schedule - Set up forwarding schedule
 /stop - Stop forwarding
 /status - Check forwarding status
-/cleanup - Remove duplicates
 /channels - List your channels
 
 **Setup:**
@@ -764,9 +794,6 @@ async def help_command(client, message: Message):
 /schedule - Set up forwarding schedule
 /stop - Stop active forwarding
 /status - Check forwarding status
-
-**Utility:**
-/cleanup - Remove duplicate messages
 
 **Admin Only:**
 /broadcast - Broadcast message to all users
@@ -868,6 +895,15 @@ Use /schedule to start forwarding! 🚀"""
     except Exception as e:
         logger.error(f"Error handling forwarded message: {e}")
         await message.reply("❌ An error occurred processing the forwarded message.")
+
+# New message handler for automatic forwarding
+@app.on_message(filters.channel)
+async def handle_channel_message(client, message: Message):
+    """Handle new messages in channels for automatic forwarding"""
+    try:
+        await bot.handle_new_message_for_forwarding(message)
+    except Exception as e:
+        logger.error(f"Error in channel message handler: {e}")
 
 @app.on_message(filters.command("schedule"))
 async def schedule_command(client, message: Message):
@@ -1064,37 +1100,6 @@ async def status_command(client, message: Message):
         logger.error(f"Error in /status command: {e}")
         await message.reply("❌ An error occurred. Please try again.")
 
-@app.on_message(filters.command("cleanup"))
-async def cleanup_command(client, message: Message):
-    try:
-        logger.info(f"/cleanup command triggered by user {message.from_user.id}")
-        await bot.update_user_activity(message.from_user.id)
-        
-        user_id = message.from_user.id
-        
-        channels = await bot.get_user_channels(user_id)
-        keyboard = []
-        
-        for channel in channels:
-            if channel.get("target_channel"):
-                try:
-                    source_info = await app.get_chat(channel["source_channel"])
-                    button_text = f"Clean {source_info.title[:20]}"
-                    callback_data = f"cleanup_{channel['source_channel']}_{channel['target_channel']}"
-                    keyboard.append([InlineKeyboardButton(button_text, callback_data=callback_data)])
-                except:
-                    continue
-                    
-        if keyboard:
-            await message.reply("🗑️ **Remove Duplicates**\n\nSelect source channel to clean:", reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await message.reply("❌ No channel pairs found.")
-            
-        logger.info(f"Cleanup options sent to user {user_id}")
-    except Exception as e:
-        logger.error(f"Error in /cleanup command: {e}")
-        await message.reply("❌ An error occurred. Please try again.")
-
 @app.on_message(filters.command("channels"))
 async def channels_command(client, message: Message):
     try:
@@ -1205,7 +1210,7 @@ async def callback_handler(client, callback_query):
                 minutes = (interval % 3600) // 60
                 time_str = f"{hours}h {minutes}m" if hours else f"{minutes}m"
                 await callback_query.answer("✅ Fixed forwarding started!")
-                await callback_query.message.edit_text(f"✅ **Forwarding Started**\n\n⏰ Mode: Fixed every {time_str}\n📊 Status: Active")
+                await callback_query.message.edit_text(f"✅ **Forwarding Started**\n\n⏰ Mode: Fixed every {time_str}\n📊 Status: Active\n\n**Note:** Messages will be forwarded automatically when they arrive in the source channel.")
             else:
                 await callback_query.answer("❌ Failed to start forwarding")
                 
@@ -1225,7 +1230,7 @@ async def callback_handler(client, callback_query):
                 min_h = min_interval // 3600
                 max_h = max_interval // 3600
                 await callback_query.answer("✅ Random forwarding started!")
-                await callback_query.message.edit_text(f"✅ **Forwarding Started**\n\n🎲 Mode: Random {min_h}h-{max_h}h\n📊 Status: Active")
+                await callback_query.message.edit_text(f"✅ **Forwarding Started**\n\n🎲 Mode: Random {min_h}h-{max_h}h\n📊 Status: Active\n\n**Note:** Messages will be forwarded automatically when they arrive in the source channel.")
             else:
                 await callback_query.answer("❌ Failed to start forwarding")
                 
@@ -1250,16 +1255,6 @@ async def callback_handler(client, callback_query):
                 await callback_query.answer("🛑 Forwarding stopped!")
                 await callback_query.message.edit_text("🛑 **Forwarding task stopped.**")
                 
-        elif data.startswith("cleanup_"):
-            parts = data.split("_")
-            source_channel = int(parts[1])
-            target_channel = int(parts[2])
-            
-            await callback_query.answer("🗑️ Cleaning duplicates...")
-            deleted_count = await bot.delete_duplicate_from_source(source_channel, target_channel)
-            
-            await callback_query.message.edit_text(f"🗑️ **Cleanup Complete**\n\n📊 Deleted {deleted_count} duplicate messages.")
-            
         elif data == "confirm_broadcast":
             if hasattr(app, 'pending_broadcast'):
                 await callback_query.answer("📢 Broadcasting...")
@@ -1278,7 +1273,6 @@ async def callback_handler(client, callback_query):
     except Exception as e:
         logger.error(f"Error in callback handler: {e}")
         await callback_query.answer("❌ An error occurred")
-
 
 def run_flask():
     """Run Flask app in a separate thread"""
