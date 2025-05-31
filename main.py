@@ -181,8 +181,9 @@ class ForwarderBot:
                     if current_number:
                         number = int(current_number)
                         unit = ""
+                        remaining_str = time_str[time_str.index(current_number) + len(current_number):].strip()
                         for key in multipliers:
-                            if time_str[len(current_number):].startswith(key):
+                            if remaining_str.startswith(key):
                                 unit = key
                                 break
                         if unit:
@@ -429,11 +430,6 @@ class ForwarderBot:
         except Exception as e:
             logger.error(f"Error in broadcast: {e}")
 
-# Initialize bot instance
-
-# Continue from Part 1...
-
-# Add this method to the ForwarderBot class (insert before bot = ForwarderBot())
     async def get_dashboard_stats(self):
         """Get comprehensive dashboard statistics"""
         if self.last_stats_update and (get_utc_now() - self.last_stats_update).seconds < 300:
@@ -572,6 +568,9 @@ class ForwarderBot:
                 "current_tasks": [],
                 "last_updated": get_utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
             }
+
+# Initialize bot instance
+bot = ForwarderBot()
 
 # Flask Routes
 @flask_app.route('/')
@@ -870,8 +869,6 @@ Use /schedule to start forwarding! 🚀"""
         logger.error(f"Error handling forwarded message: {e}")
         await message.reply("❌ An error occurred processing the forwarded message.")
 
-# Continue from Part 2...
-
 @app.on_message(filters.command("schedule"))
 async def schedule_command(client, message: Message):
     try:
@@ -1066,7 +1063,6 @@ async def status_command(client, message: Message):
     except Exception as e:
         logger.error(f"Error in /status command: {e}")
         await message.reply("❌ An error occurred. Please try again.")
-bot = ForwarderBot()
 
 @app.on_message(filters.command("cleanup"))
 async def cleanup_command(client, message: Message):
@@ -1283,6 +1279,7 @@ async def callback_handler(client, callback_query):
         logger.error(f"Error in callback handler: {e}")
         await callback_query.answer("❌ An error occurred")
 
+
 def run_flask():
     """Run Flask app in a separate thread"""
     try:
@@ -1321,6 +1318,4 @@ if __name__ == "__main__":
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Fatal error: {e}")
-        
-
 
