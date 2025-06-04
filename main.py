@@ -1,5 +1,6 @@
 # Telegram Channel Forward Bot (Forward without tag with time delay and web UI)
-# Requirements: telethon, pymongo, flask
+# Requirements: telethon, pymongo, flask, python-dotenv
+
 import os
 from telethon import TelegramClient, events
 from flask import Flask, request, render_template_string
@@ -12,11 +13,11 @@ from dotenv import load_dotenv
 # --- LOAD ENVIRONMENT VARIABLES ---
 load_dotenv()
 
-# --- CONFIGURATION ---
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
+
 client = TelegramClient('session', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 app = Flask(__name__)
 mongo = MongoClient(MONGO_URI)
@@ -116,9 +117,10 @@ async def add_source(event):
 
 # --- START THREADS ---
 def start_bot():
-    with client:
-        client.loop.run_until_complete(run_forwarder())
-        client.run_until_disconnected()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_forwarder())
+    client.run_until_disconnected()
 
 def start_flask():
     app.run(host='0.0.0.0', port=8000)
