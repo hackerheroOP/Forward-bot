@@ -153,5 +153,27 @@ class ChannelCopyBot:
                 print(f"Sleeping for {wait_time // 60} min")
                 await asyncio.sleep(wait_time)
 
-    def run(self):
-        self.bot.run()
+from fastapi import FastAPI
+import uvicorn
+from threading import Thread
+
+app = FastAPI()
+
+@app.get("/")
+def preview_status():
+    return {
+        "status": "Bot is running",
+        "author": "ChannelCopyBot",
+        "docs": "https://t.me/your_bot_username"  # replace with your actual bot link
+    }
+
+def run_bot_with_api():
+    import asyncio
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    bot = ChannelCopyBot()
+    Thread(target=bot.run).start()
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+
+if __name__ == "__main__":
+    run_bot_with_api()
+
