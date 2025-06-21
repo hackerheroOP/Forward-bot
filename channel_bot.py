@@ -1,10 +1,3 @@
-import asyncio
-import random
-import os
-from typing import List
-from pyrogram import Client, filters, types
-from pyrogram.handlers import MessageHandler
-from pymongo import MongoClient
 
 from flask import Flask, jsonify
 import threading
@@ -24,6 +17,17 @@ def run_flask():
 # Run Flask in a separate thread
 flask_thread = threading.Thread(target=run_flask)
 flask_thread.start()
+
+
+
+import asyncio
+import random
+import os
+from typing import List
+from pyrogram import Client, filters, types
+from pyrogram.handlers import MessageHandler
+from pymongo import MongoClient
+
 
 
 class ChannelCopyBot:
