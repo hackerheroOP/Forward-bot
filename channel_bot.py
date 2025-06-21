@@ -2,7 +2,7 @@ import asyncio
 import random
 import os
 from typing import List
-from pyrogram import Client, filters, types
+from pyrogram import Client, filters, types, pyrogram.handlers
 from pymongo import MongoClient
 
 class ChannelCopyBot:
@@ -15,12 +15,12 @@ class ChannelCopyBot:
         )
         self.db = MongoClient(os.getenv("MONGO_URI"))[os.getenv("DB_NAME", "promutthal_bot")]
 
-        self.bot.add_handler(filters.command(["setsource", "settarget", "startcopying"])(self.restricted_commands))
-        self.bot.add_handler(filters.command("adduser")(self.add_user_cmd))
-        self.bot.add_handler(filters.command("removeuser")(self.remove_user_cmd))
-        self.bot.add_handler(filters.command("listusers")(self.list_users))
-        self.bot.add_handler(filters.command("start")(self.set_owner_if_not_set))
-
+        self.bot.add_handler(MessageHandler(self.restricted_commands, filters.command(["setsource", "settarget", "startcopying"])))
+        self.bot.add_handler(MessageHandler(self.add_user_cmd, filters.command("adduser")))
+        self.bot.add_handler(MessageHandler(self.remove_user_cmd, filters.command("removeuser")))
+        self.bot.add_handler(MessageHandler(self.list_users, filters.command("listusers")))
+        self.bot.add_handler(MessageHandler(self.set_owner_if_not_set, filters.command("start")))
+        
     def get_users(self):
         doc = self.db.users.find_one({"_id": "access"}) or {}
         return doc.get("owner_id"), doc.get("approved_users", [])
