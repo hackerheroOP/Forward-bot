@@ -6,6 +6,26 @@ from pyrogram import Client, filters, types
 from pyrogram.handlers import MessageHandler
 from pymongo import MongoClient
 
+from flask import Flask, jsonify
+import threading
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Define the root endpoint
+@app.route("/")
+def home():
+    return jsonify({"message": "Welcome To PandazNetwork"})
+
+# Function to run the Flask app
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+# Run Flask in a separate thread
+flask_thread = threading.Thread(target=run_flask)
+flask_thread.start()
+
+
 class ChannelCopyBot:
     def __init__(self):
         self.bot = Client(
@@ -153,27 +173,6 @@ class ChannelCopyBot:
                 print(f"Sleeping for {wait_time // 60} min")
                 await asyncio.sleep(wait_time)
 
-from fastapi import FastAPI
-import uvicorn
-from threading import Thread
 
-app = FastAPI()
-
-@app.get("/")
-def preview_status():
-    return {
-        "status": "Bot is running",
-        "author": "ChannelCopyBot",
-        "docs": "https://t.me/your_bot_username"  # replace with your actual bot link
-    }
-
-def run_bot_with_api():
-    import asyncio
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    bot = ChannelCopyBot()
-    Thread(target=bot.bot.run).start()  # ✅ Corrected line
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
-
-if __name__ == "__main__":
-    run_bot_with_api()
-
+    def run(self):
+        self.bot.run()
