@@ -171,7 +171,7 @@ def run_bot_with_api():
     import asyncio
     asyncio.set_event_loop(asyncio.new_event_loop())
     bot = ChannelCopyBot()
-    Thread(target=bot.run).start()
+    Thread(target=bot.bot.run).start()  # ✅ Corrected line
     uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
 if __name__ == "__main__":
